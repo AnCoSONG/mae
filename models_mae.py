@@ -148,38 +148,42 @@ class MaskedAutoencoderViT(nn.Module):
         return x_masked, mask, ids_restore
 
     def forward_encoder(self, x, mask_ratio):
-        # embed patches
+        # embed patches  B, C, H, W -> B, L, E
         x = self.patch_embed(x)
 
-        # add pos embed w/o cls token
+        # add pos embed w/o cls token  B, L, E -> B, L, E
         x = x + self.pos_embed[:, 1:, :]
 
-        # masking: length -> length * mask_ratio
+        # masking: length -> length * mask_ratio  B, L, E -> B, L*ratio, E
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
 
         # append cls token
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+        # B, L, E -> B, L*ratio + 1, E
         x = torch.cat((cls_tokens, x), dim=1)
 
         # apply Transformer blocks
         for blk in self.blocks:
             x = blk(x)
         x = self.norm(x)
-
+        # B, L*ratio + 1, E
         return x, mask, ids_restore
 
     def forward_decoder(self, x, ids_restore):
-        # embed tokens
+        # embed tokens  B, L*ratio + 1, E -> B, L * ratio + 1, DE
         x = self.decoder_embed(x)
 
-        # append mask tokens to sequence
+        # append mask tokens to sequence 1, 1, DE -> B, L*(1-ratio), DE
         mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        # [B, L*ratio, DE] + [B, L*(1-ratio), DE] => [B, L, DE]
         x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)  # no cls token
+        # restore the order of original patches idx_restore [B, L] -> [B, L, DE]
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+        # [B, 1, DE] + [B, L, DE] -> [B, L+1, DE]
         x = torch.cat([x[:, :1, :], x_], dim=1)  # append cls token
 
-        # add pos embed
+        # add pos embed B, L+1, DE
         x = x + self.decoder_pos_embed
 
         # apply Transformer blocks
@@ -187,12 +191,12 @@ class MaskedAutoencoderViT(nn.Module):
             x = blk(x)
         x = self.decoder_norm(x)
 
-        # predictor projection
+        # predictor projection B, L+1, DE -> B, L+1, P*P*3
         x = self.decoder_pred(x)
 
         # remove cls token
         x = x[:, 1:, :]
-
+        # B, L, P*P*3
         return x
 
     def forward_loss(self, imgs, pred, mask):
@@ -202,7 +206,7 @@ class MaskedAutoencoderViT(nn.Module):
         mask: [N, L], 0 is keep, 1 is remove, 
         """
         target = self.patchify(imgs)
-        if self.norm_pix_loss:
+        if self.norm_pix_loss: # for better performance
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6)**.5
